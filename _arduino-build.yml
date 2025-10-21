@@ -3,17 +3,14 @@ name: Reusable • Arduino Build
 on:
   workflow_call:
     inputs:
-      # JSON array com FQBNs. Ex: ["esp32:esp32:esp32","esp8266:esp8266:nodemcuv2"]
-      fqbn_json:
+      fqbn_json:            # JSON com FQBNs. Ex.: ["esp32:esp32:esp32","esp8266:esp8266:nodemcuv2"]
         required: true
         type: string
-      # Glob (ou vários separados por vírgula) para localizar .ino
-      sketches_glob:
+      sketches_glob:        # Glob(s) para achar .ino (sep. por vírgula)
         required: false
         type: string
         default: "**/*.ino"
-      # Versões dos cores (pinadas) — passe "" para latest (não recomendado)
-      esp32_core_version:
+      esp32_core_version:   # "" para latest (não recomendado)
         required: false
         type: string
         default: "2.0.17"
@@ -21,43 +18,44 @@ on:
         required: false
         type: string
         default: "3.1.2"
-      # Lista de libs a instalar (nomes exatos do Library Manager); linhas separadas por \n
-      arduino_libs:
+      arduino_libs:         # Uma por linha (opcionalmente @versão)
         required: false
         type: string
         default: ""
-      # Argumentos extra do compile (ex: "-DDEBUG=1")
-      extra_build_flags:
+      extra_build_flags:    # ex.: "-DDEBUG=1 -DPOOLCLOUD=1"
         required: false
         type: string
         default: ""
-    secrets: {}
+      board_options:        # propriedades extra (menu/options), ex.: "PartitionScheme=min_spiffs,FlashMode=qio"
+        required: false
+        type: string
+        default: ""
+      upload_artifacts:     # true/false
+        required: false
+        type: boolean
+        default: true
 
 jobs:
-  build:
+  prep:
     runs-on: ubuntu-latest
-
+    outputs:
+      matrix: ${{ steps.mk-matrix.outputs.matrix }}
+      sketches: ${{ steps.list-sketches.outputs.sketches }}
     env:
       SKETCHES_GLOB: ${{ inputs.sketches_glob }}
-      EXTRA_BUILD_FLAGS: ${{ inputs.extra_build_flags }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Instalar arduino-cli
+      - name: Setup arduino-cli
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Versão do arduino-cli
-        run: arduino-cli version
-
-      - name: Diretorios de cache
+      - name: Paths de cache
         id: paths
         run: |
           echo "arduino15=$HOME/.arduino15" >> $GITHUB_OUTPUT
           echo "arduino_cache=$HOME/.cache/arduino" >> $GITHUB_OUTPUT
 
-      - name: Cache • Cores e Índices
+      - name: Cache • Cores+Índices+Libs
         uses: actions/cache@v4
         with:
           path: |
@@ -67,24 +65,14 @@ jobs:
           restore-keys: |
             arduino-${{ runner.os }}-
 
-      - name: Configurar indexes dos vendors
+      - name: Atualizar index e instalar cores pinadas
         run: |
           arduino-cli core update-index
-          # Index oficiais já cobrem esp32 e esp8266
-
-      - name: Instalar cores (ESP32/ESP8266) com versão pinada
-        run: |
-          ESP32_VER="${{ inputs.esp32_core_version }}"
-          ESP8266_VER="${{ inputs.esp8266_core_version }}"
-          if [ -n "$ESP32_VER" ]; then
-            arduino-cli core install "esp32:esp32@${ESP32_VER}"
-          else
-            arduino-cli core install "esp32:esp32"
+          if [ -n "${{ inputs.esp32_core_version }}" ]; then
+            arduino-cli core install "esp32:esp32@${{ inputs.esp32_core_version }}"
           fi
-          if [ -n "$ESP8266_VER" ]; then
-            arduino-cli core install "esp8266:esp8266@${ESP8266_VER}"
-          else
-            arduino-cli core install "esp8266:esp8266"
+          if [ -n "${{ inputs.esp8266_core_version }}" ]; then
+            arduino-cli core install "esp8266:esp8266@${{ inputs.esp8266_core_version }}"
           fi
 
       - name: Instalar bibliotecas (se houver)
@@ -92,87 +80,88 @@ jobs:
         run: |
           echo "${{ inputs.arduino_libs }}" | while IFS= read -r lib; do
             [ -z "$lib" ] && continue
-            echo "Instalando lib: $lib"
+            echo "Instalando: $lib"
             arduino-cli lib install "$lib"
           done
 
-      - name: Descobrir sketches (.ino)
-        id: list_sketches
+      - name: Listar sketches (.ino)
+        id: list-sketches
         shell: bash
         run: |
           IFS=',' read -ra GLOBS <<< "${SKETCHES_GLOB}"
           files=()
           for g in "${GLOBS[@]}"; do
-            while IFS= read -r -d '' f; do
-              files+=("$f")
-            done < <(find . -path "./.git" -prune -o -type f -name "${g// /}" -print0)
+            while IFS= read -r -d '' f; do files+=("${f#./}"); done < <(find . -path "./.git" -prune -o -type f -name "${g// /}" -print0)
           done
           if [ ${#files[@]} -eq 0 ]; then
             echo "Nenhum .ino encontrado pelos globs: ${SKETCHES_GLOB}"
             exit 1
           fi
-          printf '%s\n' "${files[@]}" | sed 's|^\./||' | sort -u > /tmp/sketches.txt
-          echo "sketch_count=$(wc -l < /tmp/sketches.txt | tr -d ' ')" >> $GITHUB_OUTPUT
-          echo "sketches=$(paste -sd ',' /tmp/sketches.txt)" >> $GITHUB_OUTPUT
-          echo "Sketches:"
-          cat /tmp/sketches.txt
+          printf '%s\n' "${files[@]}" | sort -u | paste -sd ',' - | tee /tmp/sketches.txt
+          echo "sketches=$(cat /tmp/sketches.txt)" >> $GITHUB_OUTPUT
 
-      - name: Criar matriz dinâmica (sketch × FQBN)
-        id: matrix
+      - name: Montar matriz (sketch × FQBN)
+        id: mk-matrix
         run: |
           python3 - << 'PY'
 import os, json
 sketches = os.environ.get('SKETCHES','').split(',')
 if not sketches or sketches == ['']:
-  with open('/tmp/sketches.txt') as f:
-    sketches = [l.strip() for l in f if l.strip()]
+  sketches = open('/tmp/sketches.txt').read().strip().split(',')
 fqbn = json.loads("""${{ inputs.fqbn_json }}""")
-matrix = [{"sketch": s, "fqbn": b} for s in sketches for b in fqbn]
-print("::set-output name=data::" + json.dumps({"include": matrix}))
+mat = [{"sketch": s, "fqbn": b} for s in sketches for b in fqbn]
+print(f"::set-output name=matrix::{json.dumps({'include': mat})}")
 PY
-
-      - name: Compilar matriz
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const matrix = JSON.parse(core.getInput('data', { required: true }))
-            core.setOutput('include', matrix.include)
-          result-encoding: string
-        id: out
         env:
-          data: ${{ steps.matrix.outputs.data }}
+          SKETCHES: ${{ steps.list-sketches.outputs.sketches }}
 
-  compile:
-    needs: build
+  build:
+    needs: prep
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.build.outputs['out.include']) }}
+      matrix: ${{ fromJson(needs.prep.outputs.matrix) }}
+
+    env:
+      EXTRA_BUILD_FLAGS: ${{ inputs.extra_build_flags }}
+      BOARD_OPTIONS: ${{ inputs.board_options }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
 
-      - name: Instalar arduino-cli
-        uses: arduino/setup-arduino-cli@v2
-
-      - name: Core summary
+      - name: Echo alvo
         run: |
           echo "Sketch: ${{ matrix.sketch }}"
           echo "FQBN:   ${{ matrix.fqbn }}"
+          echo "Flags:  ${EXTRA_BUILD_FLAGS}"
+          echo "Opts:   ${BOARD_OPTIONS}"
 
       - name: Compilar
+        shell: bash
         run: |
+          SKETCH_DIR="$(dirname "${{ matrix.sketch }}")"
+          # Permite passar opções de board via --build-property (menus do core)
+          BP=""
+          if [ -n "$BOARD_OPTIONS" ]; then
+            # Ex: BOARD_OPTIONS="PartitionScheme=min_spiffs,FlashMode=qio"
+            IFS=',' read -ra OPTS <<< "$BOARD_OPTIONS"
+            for o in "${OPTS[@]}"; do
+              BP+=" --build-property board_build.mcu_option=${o}"
+            done
+          fi
           arduino-cli compile \
             --fqbn "${{ matrix.fqbn }}" \
             --build-property compiler.cpp.extra_flags="${EXTRA_BUILD_FLAGS}" \
+            $BP \
             --export-binaries \
-            "$(dirname "${{ matrix.sketch }}")"
+            "$SKETCH_DIR"
 
-      - name: Publicar artefatos (.bin)
+      - name: Artefatos
+        if: ${{ inputs.upload_artifacts }}
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ matrix.fqbn }}-$(basename ${{ matrix.sketch }} .ino)
+          name: fw-${{ matrix.fqbn }}-$(basename ${{ matrix.sketch }} .ino)
           path: |
             $(dirname ${{ matrix.sketch }})/build/*/*.bin
             $(dirname ${{ matrix.sketch }})/build/*/*.elf
