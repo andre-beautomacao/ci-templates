@@ -39,7 +39,7 @@ jobs:
   prep:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.mk-matrix.outputs.matrix }}
+      matrix: ${{ steps.export-matrix.outputs.matrix }}
       sketches: ${{ steps.list-sketches.outputs.sketches }}
     env:
       SKETCHES_GLOB: ${{ inputs.sketches_glob }}
@@ -102,18 +102,29 @@ jobs:
 
       - name: Montar matriz (sketch × FQBN)
         id: mk-matrix
+        shell: bash
         run: |
-          python3 - << 'PY'
-import os, json
-sketches = os.environ.get('SKETCHES','').split(',')
-if not sketches or sketches == ['']:
-  sketches = open('/tmp/sketches.txt').read().strip().split(',')
-fqbn = json.loads("""${{ inputs.fqbn_json }}""")
-mat = [{"sketch": s, "fqbn": b} for s in sketches for b in fqbn]
-print(f"::set-output name=matrix::{json.dumps({'include': mat})}")
-PY
+          python3 - <<'PY'
+          import os, json
+          sketches = os.environ.get('SKETCHES','').split(',')
+          if not sketches or sketches == ['']:
+              sketches = open('/tmp/sketches.txt').read().strip().split(',')
+          fqbn = json.loads("""${{ inputs.fqbn_json }}""")
+          mat = [{"sketch": s, "fqbn": b} for s in sketches for b in fqbn]
+          # Saída moderna via print para captura pelo próximo step
+          print(json.dumps({'include': mat}))
+          PY
         env:
           SKETCHES: ${{ steps.list-sketches.outputs.sketches }}
+
+      - name: Exportar matriz
+        id: export-matrix
+        run: |
+          MATRIX_JSON=$(cat <<'EOF'
+          ${{ steps.mk-matrix.outputs.stdout }}
+          EOF
+          )
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
 
   build:
     needs: prep
@@ -144,7 +155,6 @@ PY
           # Permite passar opções de board via --build-property (menus do core)
           BP=""
           if [ -n "$BOARD_OPTIONS" ]; then
-            # Ex: BOARD_OPTIONS="PartitionScheme=min_spiffs,FlashMode=qio"
             IFS=',' read -ra OPTS <<< "$BOARD_OPTIONS"
             for o in "${OPTS[@]}"; do
               BP+=" --build-property board_build.mcu_option=${o}"
