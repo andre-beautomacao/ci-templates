@@ -75,14 +75,38 @@ jobs:
             arduino-cli core install "esp8266:esp8266@${{ inputs.esp8266_core_version }}"
           fi
 
-      - name: Instalar bibliotecas (se houver)
+          - name: Instalar bibliotecas (se houver)
         if: ${{ inputs.arduino_libs != '' }}
+        shell: bash
         run: |
           echo "${{ inputs.arduino_libs }}" | while IFS= read -r lib; do
             [ -z "$lib" ] && continue
             echo "Instalando: $lib"
-            arduino-cli lib install "$lib"
+            if ! arduino-cli lib install "$lib"; then
+              echo "⚠️ Biblioteca '$lib' não encontrada no index. Tentando via GitHub..."
+              case "$lib" in
+                AsyncMqttClient)
+                  git clone --depth 1 https://github.com/marvinroger/async-mqtt-client.git /tmp/AsyncMqttClient
+                  mkdir -p ~/Arduino/libraries/
+                  cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
+                  ;;
+                ESPAsyncWebServer)
+                  git clone --depth 1 https://github.com/me-no-dev/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
+                  mkdir -p ~/Arduino/libraries/
+                  cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
+                  ;;
+                ESPAsyncTCP)
+                  git clone --depth 1 https://github.com/me-no-dev/ESPAsyncTCP.git /tmp/ESPAsyncTCP
+                  mkdir -p ~/Arduino/libraries/
+                  cp -r /tmp/ESPAsyncTCP ~/Arduino/libraries/
+                  ;;
+                *)
+                  echo "Biblioteca '$lib' não possui fallback configurado. Ignorando."
+                  ;;
+              esac
+            fi
           done
+
 
       - name: Listar sketches (.ino)
         id: list-sketches
