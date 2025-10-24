@@ -74,30 +74,35 @@ jobs:
           restore-keys: |
             arduino-${{ runner.os }}-
 
-      - name: Atualizar index e instalar cores (auto)
+            - name: Atualizar index e instalar cores (auto)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           arduino-cli core update-index
 
           FQBN_JSON='${{ inputs.fqbn_json }}'
 
-          # ESP32: instala versão pinada OU, se vazio, instala latest se FQBN pedir esp32
+          # ESP32: instala versão pinada OU latest se FQBN pedir esp32
           if [ -n "${{ inputs.esp32_core_version }}" ]; then
+            echo "Instalando esp32:esp32@${{ inputs.esp32_core_version }}..."
             arduino-cli core install "esp32:esp32@${{ inputs.esp32_core_version }}"
           elif echo "$FQBN_JSON" | grep -qi 'esp32:esp32'; then
+            echo "Instalando esp32:esp32 (latest) por detecção do FQBN..."
             arduino-cli core install esp32:esp32
           fi
 
           # ESP8266: idem
           if [ -n "${{ inputs.esp8266_core_version }}" ]; then
+            echo "Instalando esp8266:esp8266@${{ inputs.esp8266_core_version }}..."
             arduino-cli core install "esp8266:esp8266@${{ inputs.esp8266_core_version }}"
           elif echo "$FQBN_JSON" | grep -qi 'esp8266:esp8266'; then
+            echo "Instalando esp8266:esp8266 (latest) por detecção do FQBN..."
             arduino-cli core install esp8266:esp8266
           fi
 
-          echo "Cores instalados:"
+          echo "=== Cores instalados ==="
           arduino-cli core list
+
 
 
 
