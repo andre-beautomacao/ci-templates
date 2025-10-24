@@ -33,7 +33,7 @@ on:
         type: string
         default: ""
       board_options:
-        description: "Opções extras de board (menus), ex.: PartitionScheme=min_spiffs"
+        description: "Opções extras do board (ex.: build.partitions=min_spiffs)"
         required: false
         type: string
         default: ""
@@ -55,11 +55,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup arduino-cli (com Board Manager URLs)
+      - name: Setup arduino-cli
         uses: arduino/setup-arduino-cli@v2
-        with:
-          additional-urls: |
-            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Configurar Board Manager URLs
+        run: |
+          set -euo pipefail
+          arduino-cli config init
+          arduino-cli config set board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json,\
             https://arduino.esp8266.com/stable/package_esp8266com_index.json
 
       - name: Paths de cache
@@ -88,19 +92,15 @@ jobs:
 
           # ESP32: pinado ou latest por FQBN
           if [ -n "${{ inputs.esp32_core_version }}" ]; then
-            echo "Instalando esp32:esp32@${{ inputs.esp32_core_version }}..."
             arduino-cli core install "esp32:esp32@${{ inputs.esp32_core_version }}"
           elif echo "$FQBN_JSON" | grep -qi 'esp32:esp32'; then
-            echo "Instalando esp32:esp32 (latest) por detecção do FQBN..."
             arduino-cli core install esp32:esp32
           fi
 
           # ESP8266: pinado ou latest por FQBN
           if [ -n "${{ inputs.esp8266_core_version }}" ]; then
-            echo "Instalando esp8266:esp8266@${{ inputs.esp8266_core_version }}..."
             arduino-cli core install "esp8266:esp8266@${{ inputs.esp8266_core_version }}"
           elif echo "$FQBN_JSON" | grep -qi 'esp8266:esp8266'; then
-            echo "Instalando esp8266:esp8266 (latest) por detecção do FQBN..."
             arduino-cli core install esp8266:esp8266
           fi
 
@@ -111,8 +111,9 @@ jobs:
         if: ${{ inputs.arduino_libs != '' }}
         shell: bash
         run: |
+          set -euo pipefail
           echo "${{ inputs.arduino_libs }}" | while IFS= read -r lib; do
-            [ -z "$lib" ] && continue
+            lib="$(echo "$lib" | xargs)"; [ -z "$lib" ] && continue
             echo "Instalando: $lib"
             if ! arduino-cli lib install "$lib"; then
               echo "⚠️ '$lib' não encontrada no Library Manager. Tentando via GitHub..."
@@ -140,6 +141,7 @@ jobs:
         id: list-sketches
         shell: bash
         run: |
+          set -euo pipefail
           IFS=',' read -ra GLOBS <<< "${SKETCHES_GLOB}"
           files=()
           for g in "${GLOBS[@]}"; do
@@ -186,11 +188,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: arduino/setup-arduino-cli@v2
-        with:
-          additional-urls: |
-            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Setup arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Garantir Board Manager URLs
+        run: |
+          set -euo pipefail
+          arduino-cli config init
+          arduino-cli config set board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json,\
             https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index
 
       - name: Echo alvo
         run: |
@@ -202,21 +211,21 @@ jobs:
       - name: Compilar
         shell: bash
         run: |
+          set -euo pipefail
           SKETCH_DIR="$(dirname "${{ matrix.sketch }}")"
 
-          # Constrói lista de --build-property a partir de board_options (ex.: "build.partitions=min_spiffs,FlashMode=qio")
+          # Constrói lista de --build-property a partir de BOARD_OPTIONS (k=v,k=v)
           BP=""
           if [ -n "$BOARD_OPTIONS" ]; then
             IFS=',' read -ra OPTS <<< "$BOARD_OPTIONS"
             for kv in "${OPTS[@]}"; do
-              kv="$(echo "$kv" | xargs)"
-              [ -z "$kv" ] && continue
+              kv="$(echo "$kv" | xargs)"; [ -z "$kv" ] && continue
               BP+=" --build-property ${kv}"
             done
           fi
 
-          # Se for ESP32 e usuário não passou nada, aplica min_spiffs por padrão
-          if echo "${{ matrix.fqbn }}" | grep -qi '^esp32:esp32:' && [[ "$BOARD_OPTIONS" == "" ]]; then
+          # Se for ESP32 e não foi informado nada, aplica min_spiffs por padrão
+          if echo "${{ matrix.fqbn }}" | grep -qi '^esp32:esp32:' && [ -z "$BOARD_OPTIONS" ]; then
             BP+=" --build-property build.partitions=min_spiffs"
             echo "Usando padrão ESP32: build.partitions=min_spiffs"
           fi
@@ -228,14 +237,14 @@ jobs:
             --export-binaries \
             "$SKETCH_DIR"
 
-
       - name: Copiar binário principal para ./firmware/firmware.bin
         shell: bash
         run: |
+          set -euo pipefail
           ROOT_DIR="$(dirname "${{ matrix.sketch }}")"
           BUILD_DIR="${ROOT_DIR}/build"
           TARGET_NAME="$(basename "${{ matrix.sketch }}" .ino)"
-          BIN_ORIG="$(find "$BUILD_DIR" -maxdepth 2 -type f -name "${TARGET_NAME}.ino.bin" | head -n 1)"
+          BIN_ORIG="$(find "$BUILD_DIR" -maxdepth 3 -type f -name "${TARGET_NAME}.ino.bin" | head -n 1)"
           DEST_DIR="${ROOT_DIR}/firmware"
           DEST_BIN="${DEST_DIR}/firmware.bin"
 
@@ -247,7 +256,7 @@ jobs:
           else
             echo "❌ Binário principal não encontrado."
             echo "Arquivos .bin existentes:"
-            find "$BUILD_DIR" -maxdepth 2 -type f -name "*.bin" || true
+            find "$BUILD_DIR" -maxdepth 3 -type f -name "*.bin" || true
             exit 1
           fi
 
