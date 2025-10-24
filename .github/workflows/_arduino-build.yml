@@ -84,6 +84,7 @@ jobs:
             arduino-cli core install "esp8266:esp8266@${{ inputs.esp8266_core_version }}"
           fi
 
+
       - name: Instalar bibliotecas (se houver)
         if: ${{ inputs.arduino_libs != '' }}
         shell: bash
