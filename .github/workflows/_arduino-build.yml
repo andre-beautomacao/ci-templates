@@ -55,8 +55,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup arduino-cli
+      - name: Setup arduino-cli (com Board Manager URLs)
         uses: arduino/setup-arduino-cli@v2
+        with:
+          additional-urls: |
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+            https://arduino.esp8266.com/stable/package_esp8266com_index.json
 
       - name: Paths de cache
         id: paths
@@ -74,7 +78,7 @@ jobs:
           restore-keys: |
             arduino-${{ runner.os }}-
 
-            - name: Atualizar index e instalar cores (auto)
+      - name: Atualizar index e instalar cores (auto)
         shell: bash
         run: |
           set -euo pipefail
@@ -82,7 +86,7 @@ jobs:
 
           FQBN_JSON='${{ inputs.fqbn_json }}'
 
-          # ESP32: instala versão pinada OU latest se FQBN pedir esp32
+          # ESP32: pinado ou latest por FQBN
           if [ -n "${{ inputs.esp32_core_version }}" ]; then
             echo "Instalando esp32:esp32@${{ inputs.esp32_core_version }}..."
             arduino-cli core install "esp32:esp32@${{ inputs.esp32_core_version }}"
@@ -91,7 +95,7 @@ jobs:
             arduino-cli core install esp32:esp32
           fi
 
-          # ESP8266: idem
+          # ESP8266: pinado ou latest por FQBN
           if [ -n "${{ inputs.esp8266_core_version }}" ]; then
             echo "Instalando esp8266:esp8266@${{ inputs.esp8266_core_version }}..."
             arduino-cli core install "esp8266:esp8266@${{ inputs.esp8266_core_version }}"
@@ -102,9 +106,6 @@ jobs:
 
           echo "=== Cores instalados ==="
           arduino-cli core list
-
-
-
 
       - name: Instalar bibliotecas (se houver)
         if: ${{ inputs.arduino_libs != '' }}
@@ -186,6 +187,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-arduino-cli@v2
+        with:
+          additional-urls: |
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+            https://arduino.esp8266.com/stable/package_esp8266com_index.json
 
       - name: Echo alvo
         run: |
@@ -218,7 +223,7 @@ jobs:
           ROOT_DIR="$(dirname "${{ matrix.sketch }}")"
           BUILD_DIR="${ROOT_DIR}/build"
           TARGET_NAME="$(basename "${{ matrix.sketch }}" .ino)"
-          BIN_ORIG="$(find "$BUILD_DIR" -type f -name "${TARGET_NAME}.ino.bin" | head -n 1)"
+          BIN_ORIG="$(find "$BUILD_DIR" -maxdepth 2 -type f -name "${TARGET_NAME}.ino.bin" | head -n 1)"
           DEST_DIR="${ROOT_DIR}/firmware"
           DEST_BIN="${DEST_DIR}/firmware.bin"
 
@@ -230,7 +235,7 @@ jobs:
           else
             echo "❌ Binário principal não encontrado."
             echo "Arquivos .bin existentes:"
-            find "$BUILD_DIR" -type f -name "*.bin" -maxdepth 2 || true
+            find "$BUILD_DIR" -maxdepth 2 -type f -name "*.bin" || true
             exit 1
           fi
 
