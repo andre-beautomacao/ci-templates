@@ -203,19 +203,31 @@ jobs:
         shell: bash
         run: |
           SKETCH_DIR="$(dirname "${{ matrix.sketch }}")"
+
+          # Constrói lista de --build-property a partir de board_options (ex.: "build.partitions=min_spiffs,FlashMode=qio")
           BP=""
           if [ -n "$BOARD_OPTIONS" ]; then
             IFS=',' read -ra OPTS <<< "$BOARD_OPTIONS"
-            for o in "${OPTS[@]}"; do
-              BP+=" --build-property board_build.mcu_option=${o}"
+            for kv in "${OPTS[@]}"; do
+              kv="$(echo "$kv" | xargs)"
+              [ -z "$kv" ] && continue
+              BP+=" --build-property ${kv}"
             done
           fi
+
+          # Se for ESP32 e usuário não passou nada, aplica min_spiffs por padrão
+          if echo "${{ matrix.fqbn }}" | grep -qi '^esp32:esp32:' && [[ "$BOARD_OPTIONS" == "" ]]; then
+            BP+=" --build-property build.partitions=min_spiffs"
+            echo "Usando padrão ESP32: build.partitions=min_spiffs"
+          fi
+
           arduino-cli compile \
             --fqbn "${{ matrix.fqbn }}" \
             --build-property compiler.cpp.extra_flags="${EXTRA_BUILD_FLAGS}" \
             $BP \
             --export-binaries \
             "$SKETCH_DIR"
+
 
       - name: Copiar binário principal para ./firmware/firmware.bin
         shell: bash
