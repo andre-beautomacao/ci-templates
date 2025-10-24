@@ -3,14 +3,16 @@ name: Reusable • Arduino Build
 on:
   workflow_call:
     inputs:
-      fqbn_json:            # JSON com FQBNs. Ex.: ["esp32:esp32:esp32","esp8266:esp8266:nodemcuv2"]
+      fqbn_json:
+        description: JSON com FQBNs. Ex.: ["esp32:esp32:esp32","esp8266:esp8266:nodemcuv2"]
         required: true
         type: string
-      sketches_glob:        # Glob(s) para achar .ino (sep. por vírgula)
+      sketches_glob:
+        description: Globs para achar .ino (sep. por vírgula)
         required: false
         type: string
-        default: "**/*.ino"
-      esp32_core_version:   # "" para latest (não recomendado)
+        default: "*.ino"
+      esp32_core_version:
         required: false
         type: string
         default: "2.0.17"
@@ -18,19 +20,19 @@ on:
         required: false
         type: string
         default: "3.1.2"
-      arduino_libs:         # Uma por linha (opcionalmente @versão)
+      arduino_libs:
         required: false
         type: string
         default: ""
-      extra_build_flags:    # ex.: "-DDEBUG=1 -DPOOLCLOUD=1"
+      extra_build_flags:
         required: false
         type: string
         default: ""
-      board_options:        # propriedades extra (menu/options), ex.: "PartitionScheme=min_spiffs,FlashMode=qio"
+      board_options:
         required: false
         type: string
         default: ""
-      upload_artifacts:     # true/false
+      upload_artifacts:
         required: false
         type: boolean
         default: true
@@ -43,6 +45,7 @@ jobs:
       sketches: ${{ steps.list-sketches.outputs.sketches }}
     env:
       SKETCHES_GLOB: ${{ inputs.sketches_glob }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -83,25 +86,22 @@ jobs:
             [ -z "$lib" ] && continue
             echo "Instalando: $lib"
             if ! arduino-cli lib install "$lib"; then
-              echo "⚠️ Biblioteca '$lib' não encontrada no index. Tentando via GitHub..."
+              echo "⚠️ '$lib' não encontrada no Library Manager. Tentando via GitHub..."
               case "$lib" in
                 AsyncMqttClient)
                   git clone --depth 1 https://github.com/marvinroger/async-mqtt-client.git /tmp/AsyncMqttClient
-                  mkdir -p ~/Arduino/libraries/
-                  cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
+                  mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
                   ;;
                 ESPAsyncWebServer)
                   git clone --depth 1 https://github.com/me-no-dev/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
-                  mkdir -p ~/Arduino/libraries/
-                  cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
+                  mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
                   ;;
                 ESPAsyncTCP)
                   git clone --depth 1 https://github.com/me-no-dev/ESPAsyncTCP.git /tmp/ESPAsyncTCP
-                  mkdir -p ~/Arduino/libraries/
-                  cp -r /tmp/ESPAsyncTCP ~/Arduino/libraries/
+                  mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncTCP ~/Arduino/libraries/
                   ;;
                 *)
-                  echo "Biblioteca '$lib' não possui fallback configurado. Ignorando."
+                  echo "Sem fallback configurado para '$lib'."
                   ;;
               esac
             fi
@@ -114,7 +114,9 @@ jobs:
           IFS=',' read -ra GLOBS <<< "${SKETCHES_GLOB}"
           files=()
           for g in "${GLOBS[@]}"; do
-            while IFS= read -r -d '' f; do files+=("${f#./}"); done < <(find . -path "./.git" -prune -o -type f -name "${g// /}" -print0)
+            pat="${g//\*\*\//}"
+            pat="${pat// /}"
+            while IFS= read -r -d '' f; do files+=("${f#./}"); done < <(find . -path "./.git" -prune -o -type f -iname "$pat" -print0)
           done
           if [ ${#files[@]} -eq 0 ]; then
             echo "Nenhum .ino encontrado pelos globs: ${SKETCHES_GLOB}"
@@ -125,27 +127,21 @@ jobs:
 
       - name: Montar matriz (sketch × FQBN)
         id: mk-matrix
-        shell: bash
+        shell: python3 {0}
         run: |
-          python3 - <<'PY'
           import os, json
-          sketches = os.environ.get('SKETCHES','').split(',')
-          if not sketches or sketches == ['']:
-              sketches = open('/tmp/sketches.txt').read().strip().split(',')
+          sketches = os.environ.get("SKETCHES", "").split(",")
+          if not sketches or sketches == [""]:
+              sketches = open("/tmp/sketches.txt").read().strip().split(",")
           fqbn = json.loads("""${{ inputs.fqbn_json }}""")
           mat = [{"sketch": s, "fqbn": b} for s in sketches for b in fqbn]
-          print(json.dumps({'include': mat}))
-          PY
-        env:
-          SKETCHES: ${{ steps.list-sketches.outputs.sketches }}
+          with open("/tmp/matrix.json", "w") as f:
+              json.dump({"include": mat}, f)
 
       - name: Exportar matriz
         id: export-matrix
         run: |
-          MATRIX_JSON=$(cat <<'EOF'
-          ${{ steps.mk-matrix.outputs.stdout }}
-          EOF
-          )
+          MATRIX_JSON=$(tr -d '\n' < /tmp/matrix.json)
           echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
 
   build:
@@ -188,12 +184,35 @@ jobs:
             --export-binaries \
             "$SKETCH_DIR"
 
+      - name: Copiar binário principal para ./firmware/firmware.bin
+        shell: bash
+        run: |
+          ROOT_DIR="$(dirname "${{ matrix.sketch }}")"
+          BUILD_DIR="${ROOT_DIR}/build"
+          TARGET_NAME="$(basename "${{ matrix.sketch }}" .ino)"
+          # encontra o .ino.bin principal (independente do nome da subpasta de board)
+          BIN_ORIG="$(find "$BUILD_DIR" -type f -name "${TARGET_NAME}.ino.bin" | head -n 1)"
+          DEST_DIR="${ROOT_DIR}/firmware"
+          DEST_BIN="${DEST_DIR}/firmware.bin"
+
+          echo "Procurando: ${TARGET_NAME}.ino.bin em $BUILD_DIR"
+          mkdir -p "$DEST_DIR"
+          if [ -n "$BIN_ORIG" ] && [ -f "$BIN_ORIG" ]; then
+            cp "$BIN_ORIG" "$DEST_BIN"
+            echo "✅ Copiado para: $DEST_BIN"
+          else
+            echo "❌ Binário principal não encontrado."
+            echo "Arquivos .bin existentes:"
+            find "$BUILD_DIR" -type f -name "*.bin" -maxdepth 2 || true
+            exit 1
+          fi
+
       - name: Artefatos
         if: ${{ inputs.upload_artifacts }}
         uses: actions/upload-artifact@v4
         with:
           name: fw-${{ matrix.fqbn }}-$(basename ${{ matrix.sketch }} .ino)
           path: |
-            $(dirname ${{ matrix.sketch }})/build/*/*.bin
+            $(dirname ${{ matrix.sketch }})/firmware/firmware.bin
             $(dirname ${{ matrix.sketch }})/build/*/*.elf
           if-no-files-found: warn
