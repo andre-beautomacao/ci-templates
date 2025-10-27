@@ -1,29 +1,29 @@
-name: Reusable • Arduino Build
+name: Reusable • Arduino Build (single job)
 
 on:
   workflow_call:
     inputs:
       fqbn_json:
-        description: "JSON com FQBNs. Ex.: [\"esp32:esp32:esp32\",\"esp8266:esp8266:nodemcuv2\"]"
+        description: 'JSON com FQBN(s). Ex.: ["esp32:esp32:esp32"] (usaremos o 1º)'
         required: true
         type: string
       sketches_glob:
-        description: "Globs para achar .ino (separe por vírgula)"
+        description: 'Globs para achar .ino (separe por vírgula). Default: "*.ino"'
         required: false
         type: string
         default: "*.ino"
       esp32_core_version:
-        description: "Versão do core ESP32; vazio para não instalar"
+        description: "Versão do core ESP32; vazio para latest"
         required: false
         type: string
         default: "3.3.2"
       esp8266_core_version:
-        description: "Versão do core ESP8266; vazio para não instalar"
+        description: "Versão do core ESP8266; vazio para latest"
         required: false
         type: string
         default: "3.1.2"
       arduino_libs:
-        description: "Bibliotecas (uma por linha; opcionalmente @versão)"
+        description: "Bibliotecas (uma por linha; pode usar @versão)"
         required: false
         type: string
         default: ""
@@ -33,190 +33,55 @@ on:
         type: string
         default: ""
       board_options:
-        description: "Opções extras do board (ex.: build.partitions=min_spiffs)"
+        description: 'Opções do board (ex.: "build.partitions=min_spiffs")'
         required: false
         type: string
         default: ""
       upload_artifacts:
-        description: "Publicar artefatos do build (bin/elf)"
+        description: "Publicar artefatos (firmware.bin, .elf)"
         required: false
         type: boolean
         default: true
 
 jobs:
-  prep:
+  build:
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.export-matrix.outputs.matrix }}
-      sketches: ${{ steps.list-sketches.outputs.sketches }}
+
     env:
       SKETCHES_GLOB: ${{ inputs.sketches_glob }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup arduino-cli
-        uses: arduino/setup-arduino-cli@v2
-
-      - name: Configurar Board Manager URLs
-        run: |
-          set -euo pipefail
-          arduino-cli config init
-          # limpa valores antigos (inclusive algum com vírgula no final)
-          arduino-cli config delete board_manager.additional_urls || true
-          # adiciona cada URL separadamente (sem vírgulas)
-          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-          arduino-cli config add board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-          # confere
-          arduino-cli config dump
-          arduino-cli core update-index
-      
-
-
-      - name: Paths de cache
-        id: paths
-        run: |
-          echo "arduino15=$HOME/.arduino15" >> $GITHUB_OUTPUT
-          echo "arduino_cache=$HOME/.cache/arduino" >> $GITHUB_OUTPUT
-
-      - name: Cache • Cores+Índices+Libs
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ steps.paths.outputs.arduino15 }}
-            ${{ steps.paths.outputs.arduino_cache }}
-          key: arduino-${{ runner.os }}-${{ hashFiles('**/library.properties', '**/libraries.txt', '.github/arduino-libs.txt') }}
-          restore-keys: |
-            arduino-${{ runner.os }}-
-
-      - name: Atualizar index e instalar cores (auto)
-        shell: bash
-        run: |
-          set -euo pipefail
-          arduino-cli core update-index
-
-          FQBN_JSON='${{ inputs.fqbn_json }}'
-
-          # ESP32: pinado ou latest por FQBN
-          if [ -n "${{ inputs.esp32_core_version }}" ]; then
-            arduino-cli core install "esp32:esp32@${{ inputs.esp32_core_version }}"
-          elif echo "$FQBN_JSON" | grep -qi 'esp32:esp32'; then
-            arduino-cli core install esp32:esp32
-          fi
-
-          # ESP8266: pinado ou latest por FQBN
-          if [ -n "${{ inputs.esp8266_core_version }}" ]; then
-            arduino-cli core install "esp8266:esp8266@${{ inputs.esp8266_core_version }}"
-          elif echo "$FQBN_JSON" | grep -qi 'esp8266:esp8266'; then
-            arduino-cli core install esp8266:esp8266
-          fi
-
-          echo "=== Cores instalados ==="
-          arduino-cli core list
-
-      - name: Instalar bibliotecas (se houver)
-        if: ${{ inputs.arduino_libs != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "${{ inputs.arduino_libs }}" | while IFS= read -r lib; do
-            lib="$(echo "$lib" | xargs)"; [ -z "$lib" ] && continue
-            echo "Instalando: $lib"
-            if ! arduino-cli lib install "$lib"; then
-              echo "⚠️ '$lib' não encontrada no Library Manager. Tentando via GitHub..."
-              case "$lib" in
-                AsyncMqttClient)
-                  git clone --depth 1 https://github.com/marvinroger/async-mqtt-client.git /tmp/AsyncMqttClient
-                  mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
-                  ;;
-                ESPAsyncWebServer)
-                  git clone --depth 1 https://github.com/me-no-dev/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
-                  mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
-                  ;;
-                ESPAsyncTCP)
-                  git clone --depth 1 https://github.com/me-no-dev/ESPAsyncTCP.git /tmp/ESPAsyncTCP
-                  mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncTCP ~/Arduino/libraries/
-                  ;;
-                *)
-                  echo "Sem fallback configurado para '$lib'."
-                  ;;
-              esac
-            fi
-          done
-
-      - name: Listar sketches (.ino)
-        id: list-sketches
-        shell: bash
-        run: |
-          set -euo pipefail
-          IFS=',' read -ra GLOBS <<< "${SKETCHES_GLOB}"
-          files=()
-          for g in "${GLOBS[@]}"; do
-            pat="${g//\*\*\//}"
-            pat="${pat// /}"
-            while IFS= read -r -d '' f; do files+=("${f#./}"); done < <(find . -path "./.git" -prune -o -type f -iname "$pat" -print0)
-          done
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "Nenhum .ino encontrado pelos globs: ${SKETCHES_GLOB}"
-            exit 1
-          fi
-          printf '%s\n' "${files[@]}" | sort -u | paste -sd ',' - | tee /tmp/sketches.txt
-          echo "sketches=$(cat /tmp/sketches.txt)" >> $GITHUB_OUTPUT
-
-      - name: Montar matriz (sketch × FQBN)
-        id: mk-matrix
-        shell: python3 {0}
-        run: |
-          import os, json
-          sketches = os.environ.get("SKETCHES", "").split(",")
-          if not sketches or sketches == [""]:
-              sketches = open("/tmp/sketches.txt").read().strip().split(",")
-          fqbn = json.loads("""${{ inputs.fqbn_json }}""")
-          mat = [{"sketch": s, "fqbn": b} for s in sketches for b in fqbn]
-          with open("/tmp/matrix.json", "w") as f:
-              json.dump({"include": mat}, f)
-
-      - name: Exportar matriz
-        id: export-matrix
-        run: |
-          MATRIX_JSON=$(tr -d '\n' < /tmp/matrix.json)
-          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
-
-  # ... (tudo igual acima)
-
-  build:
-    needs: prep
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prep.outputs.matrix) }}
-
-    env:
       EXTRA_BUILD_FLAGS: ${{ inputs.extra_build_flags }}
       BOARD_OPTIONS: ${{ inputs.board_options }}
 
     steps:
       - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
 
-      - name: Setup arduino-cli
-        uses: arduino/setup-arduino-cli@v2
-
-      - name: Garantir Board Manager URLs
+      - name: Configurar Board Manager URLs
         run: |
           set -euo pipefail
           arduino-cli config init
           arduino-cli config delete board_manager.additional_urls || true
           arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli config add board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-          arduino-cli core update-index
           arduino-cli config dump
+          arduino-cli core update-index
 
-      # 👇 NOVO: sempre garantir o core no runner do job *build*
-      - name: Instalar core requerido (sem cache)
-        shell: bash
+      - name: Escolher FQBN (1º do JSON)
+        id: fqbn
+        shell: python3 {0}
+        run: |
+          import json, os
+          data = json.loads("""${{ inputs.fqbn_json }}""")
+          if not isinstance(data, list) or not data:
+            raise SystemExit("fqbn_json precisa ser uma lista não-vazia")
+          fqbn = data[0]
+          print(f"FQBN selecionado: {fqbn}")
+          open("/tmp/fqbn.txt","w").write(fqbn)
+
+      - name: Instalar core do FQBN
         run: |
           set -euo pipefail
-          FQBN="${{ matrix.fqbn }}"
+          FQBN="$(cat /tmp/fqbn.txt)"
           arduino-cli core update-index
           case "$FQBN" in
             esp32:esp32:*)
@@ -234,24 +99,100 @@ jobs:
               fi
               ;;
             *)
-              echo "FQBN não reconhecido para instalação automática: $FQBN"
+              echo "FQBN desconhecido: $FQBN"; exit 1
               ;;
           esac
-          echo "== Cores instalados =="
+          echo "=== Cores instalados ==="
           arduino-cli core list
 
-      - name: Echo alvo
+      - name: Instalar bibliotecas (se houver)
+        if: ${{ inputs.arduino_libs != '' }}
+        shell: bash
         run: |
-          echo "Sketch: ${{ matrix.sketch }}"
-          echo "FQBN:   ${{ matrix.fqbn }}"
-          echo "Flags:  ${EXTRA_BUILD_FLAGS}"
-          echo "Opts:   ${BOARD_OPTIONS}"
+          set -euo pipefail
+          echo "${{ inputs.arduino_libs }}" | while IFS= read -r lib; do
+            lib="$(echo "$lib" | xargs)"; [ -z "$lib" ] && continue
+            echo "Instalando: $lib"
+            install_ok=false
+
+            # 1) tenta como veio
+            if arduino-cli lib install "$lib"; then
+              install_ok=true
+            else
+              echo "⚠️ '$lib' não encontrada. Tentando variações…"
+              # 2) alias específico LiquidCrystal_I2C -> LiquidCrystal I2C
+              if [[ "$lib" =~ ^LiquidCrystal_I2C(@.*)?$ ]]; then
+                alt="${lib/_/ }"
+                echo "→ tentando '$alt'"
+                arduino-cli lib install "$alt" && install_ok=true
+              fi
+              # 3) genérico: trocar "_" por espaço
+              if [ "$install_ok" = false ]; then
+                generic="$(echo "$lib" | sed 's/_/ /g')"
+                if [ "$generic" != "$lib" ]; then
+                  echo "→ tentando '$generic'"
+                  arduino-cli lib install "$generic" && install_ok=true
+                fi
+              fi
+              # 4) fallbacks via GitHub (async*)
+              if [ "$install_ok" = false ]; then
+                case "$lib" in
+                  AsyncMqttClient*)
+                    git clone --depth 1 https://github.com/marvinroger/async-mqtt-client.git /tmp/AsyncMqttClient
+                    mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
+                    install_ok=true
+                    ;;
+                  ESPAsyncWebServer*)
+                    git clone --depth 1 https://github.com/me-no-dev/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
+                    mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
+                    install_ok=true
+                    ;;
+                  ESPAsyncTCP*|AsyncTCP*)
+                    git clone --depth 1 https://github.com/me-no-dev/ESPAsyncTCP.git /tmp/ESPAsyncTCP || true
+                    git clone --depth 1 https://github.com/me-no-dev/AsyncTCP.git   /tmp/AsyncTCP   || true
+                    mkdir -p ~/Arduino/libraries
+                    [ -d /tmp/ESPAsyncTCP ] && cp -r /tmp/ESPAsyncTCP ~/Arduino/libraries/
+                    [ -d /tmp/AsyncTCP ]   && cp -r /tmp/AsyncTCP   ~/Arduino/libraries/
+                    install_ok=true
+                    ;;
+                esac
+              fi
+            fi
+
+            if [ "$install_ok" = true ]; then
+              echo "✅ OK: $lib"
+            else
+              echo "❌ Não foi possível instalar '$lib'."
+              exit 1
+            fi
+          done
+
+      - name: Localizar sketch (.ino)
+        id: find-sketch
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra GLOBS <<< "${SKETCHES_GLOB}"
+          files=()
+          for g in "${GLOBS[@]}"; do
+            pat="${g//\*\*\//}"; pat="${pat// /}"
+            while IFS= read -r -d '' f; do files+=("${f#./}"); done < <(find . -path "./.git" -prune -o -type f -iname "$pat" -print0)
+          done
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "Nenhum .ino encontrado pelos globs: ${SKETCHES_GLOB}"; exit 1
+          fi
+          # usa o primeiro encontrado (padrão: um sketch por repositório)
+          echo "SKETCH=${files[0]}" >> $GITHUB_OUTPUT
+          echo "Sketch selecionado: ${files[0]}"
 
       - name: Compilar
         shell: bash
         run: |
           set -euo pipefail
-          SKETCH_DIR="$(dirname "${{ matrix.sketch }}")"
+          FQBN="$(cat /tmp/fqbn.txt)"
+          SKETCH="${{ steps.find-sketch.outputs.SKETCH }}"
+          SKETCH_DIR="$(dirname "$SKETCH")"
+
           BP=""
           if [ -n "$BOARD_OPTIONS" ]; then
             IFS=',' read -ra OPTS <<< "$BOARD_OPTIONS"
@@ -260,12 +201,14 @@ jobs:
               BP+=" --build-property ${kv}"
             done
           fi
-          if echo "${{ matrix.fqbn }}" | grep -qi '^esp32:esp32:' && [ -z "$BOARD_OPTIONS" ]; then
+          if echo "$FQBN" | grep -qi '^esp32:esp32:' && [ -z "$BOARD_OPTIONS" ]; then
             BP+=" --build-property build.partitions=min_spiffs"
             echo "Usando padrão ESP32: build.partitions=min_spiffs"
           fi
+
+          echo "Compilando: $SKETCH (FQBN=$FQBN)"
           arduino-cli compile \
-            --fqbn "${{ matrix.fqbn }}" \
+            --fqbn "$FQBN" \
             --build-property compiler.cpp.extra_flags="${EXTRA_BUILD_FLAGS}" \
             $BP \
             --export-binaries \
@@ -275,21 +218,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ROOT_DIR="$(dirname "${{ matrix.sketch }}")"
+          SKETCH="${{ steps.find-sketch.outputs.SKETCH }}"
+          ROOT_DIR="$(dirname "$SKETCH")"
           BUILD_DIR="${ROOT_DIR}/build"
-          TARGET_NAME="$(basename "${{ matrix.sketch }}" .ino)"
+          TARGET_NAME="$(basename "$SKETCH" .ino)"
           BIN_ORIG="$(find "$BUILD_DIR" -maxdepth 3 -type f -name "${TARGET_NAME}.ino.bin" | head -n 1)"
           DEST_DIR="${ROOT_DIR}/firmware"
-          DEST_BIN="${DEST_DIR}/firmware.bin"
-          echo "Procurando: ${TARGET_NAME}.ino.bin em $BUILD_DIR"
           mkdir -p "$DEST_DIR"
           if [ -n "$BIN_ORIG" ] && [ -f "$BIN_ORIG" ]; then
-            cp "$BIN_ORIG" "$DEST_BIN"
-            echo "✅ Copiado para: $DEST_BIN"
+            cp "$BIN_ORIG" "$DEST_DIR/firmware.bin"
+            echo "✅ Copiado para: $DEST_DIR/firmware.bin"
           else
             echo "❌ Binário principal não encontrado."
-            echo "Arquivos .bin existentes:"
-            find "$BUILD_DIR" -maxdepth 3 -type f -name "*.bin" || true
+            echo "Arquivos .bin existentes:"; find "$BUILD_DIR" -maxdepth 3 -type f -name "*.bin" || true
             exit 1
           fi
 
@@ -297,8 +238,8 @@ jobs:
         if: ${{ inputs.upload_artifacts }}
         uses: actions/upload-artifact@v4
         with:
-          name: fw-${{ matrix.fqbn }}-$(basename ${{ matrix.sketch }} .ino)
+          name: firmware
           path: |
-            $(dirname ${{ matrix.sketch }})/firmware/firmware.bin
-            $(dirname ${{ matrix.sketch }})/build/*/*.elf
+            **/firmware/firmware.bin
+            **/build/*/*.elf
           if-no-files-found: warn
