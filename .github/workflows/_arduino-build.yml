@@ -63,8 +63,9 @@ jobs:
           set -euo pipefail
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls \
-            https://espressif.github.io/arduino-esp32/package_esp32_index.json,\
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json,\
             https://arduino.esp8266.com/stable/package_esp8266com_index.json
+
 
       - name: Paths de cache
         id: paths
