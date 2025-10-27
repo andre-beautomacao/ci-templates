@@ -182,6 +182,8 @@ jobs:
           MATRIX_JSON=$(tr -d '\n' < /tmp/matrix.json)
           echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
 
+  # ... (tudo igual acima)
+
   build:
     needs: prep
     runs-on: ubuntu-latest
@@ -203,15 +205,40 @@ jobs:
         run: |
           set -euo pipefail
           arduino-cli config init
-          # limpa valores antigos (inclusive algum com vírgula no final)
           arduino-cli config delete board_manager.additional_urls || true
-          # adiciona cada URL separadamente (sem vírgulas)
           arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli config add board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-          # confere
-          arduino-cli config dump
           arduino-cli core update-index
-      
+          arduino-cli config dump
+
+      # 👇 NOVO: sempre garantir o core no runner do job *build*
+      - name: Instalar core requerido (sem cache)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FQBN="${{ matrix.fqbn }}"
+          arduino-cli core update-index
+          case "$FQBN" in
+            esp32:esp32:*)
+              if [ -n "${{ inputs.esp32_core_version }}" ]; then
+                arduino-cli core install "esp32:esp32@${{ inputs.esp32_core_version }}"
+              else
+                arduino-cli core install esp32:esp32
+              fi
+              ;;
+            esp8266:esp8266:*)
+              if [ -n "${{ inputs.esp8266_core_version }}" ]; then
+                arduino-cli core install "esp8266:esp8266@${{ inputs.esp8266_core_version }}"
+              else
+                arduino-cli core install esp8266:esp8266
+              fi
+              ;;
+            *)
+              echo "FQBN não reconhecido para instalação automática: $FQBN"
+              ;;
+          esac
+          echo "== Cores instalados =="
+          arduino-cli core list
 
       - name: Echo alvo
         run: |
@@ -225,8 +252,6 @@ jobs:
         run: |
           set -euo pipefail
           SKETCH_DIR="$(dirname "${{ matrix.sketch }}")"
-
-          # Constrói lista de --build-property a partir de BOARD_OPTIONS (k=v,k=v)
           BP=""
           if [ -n "$BOARD_OPTIONS" ]; then
             IFS=',' read -ra OPTS <<< "$BOARD_OPTIONS"
@@ -235,13 +260,10 @@ jobs:
               BP+=" --build-property ${kv}"
             done
           fi
-
-          # Se for ESP32 e não foi informado nada, aplica min_spiffs por padrão
           if echo "${{ matrix.fqbn }}" | grep -qi '^esp32:esp32:' && [ -z "$BOARD_OPTIONS" ]; then
             BP+=" --build-property build.partitions=min_spiffs"
             echo "Usando padrão ESP32: build.partitions=min_spiffs"
           fi
-
           arduino-cli compile \
             --fqbn "${{ matrix.fqbn }}" \
             --build-property compiler.cpp.extra_flags="${EXTRA_BUILD_FLAGS}" \
@@ -259,7 +281,6 @@ jobs:
           BIN_ORIG="$(find "$BUILD_DIR" -maxdepth 3 -type f -name "${TARGET_NAME}.ino.bin" | head -n 1)"
           DEST_DIR="${ROOT_DIR}/firmware"
           DEST_BIN="${DEST_DIR}/firmware.bin"
-
           echo "Procurando: ${TARGET_NAME}.ino.bin em $BUILD_DIR"
           mkdir -p "$DEST_DIR"
           if [ -n "$BIN_ORIG" ] && [ -f "$BIN_ORIG" ]; then
