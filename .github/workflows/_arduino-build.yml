@@ -105,44 +105,74 @@ jobs:
           echo "=== Cores instalados ==="
           arduino-cli core list
 
-      - name: Instalar bibliotecas (se houver)
+      - name: Instalar bibliotecas (Library Manager + fallbacks GitHub)
         if: ${{ inputs.arduino_libs != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "${{ inputs.arduino_libs }}" | while IFS= read -r lib; do
-            lib="$(echo "$lib" | xargs)"; [ -z "$lib" ] && continue
-            echo "Instalando: $lib"
-            install_ok=false
+          echo "${{ inputs.arduino_libs }}" | awk 'NF' | while read -r raw; do
+            # normaliza linha (remove CRLF e espaços)
+            lib="$(echo "$raw" | tr -d '\r' | xargs)"
+            [ -z "$lib" ] && continue
 
-            # 1) tenta como veio
-            if arduino-cli lib install "$lib"; then
-              install_ok=true
-            else
-              echo "⚠️ '$lib' não encontrada. Tentando variações…"
-              # 2) alias específico LiquidCrystal_I2C -> LiquidCrystal I2C
-              if [[ "$lib" =~ ^LiquidCrystal_I2C(@.*)?$ ]]; then
-                alt="${lib/_/ }"
-                echo "→ tentando '$alt'"
-                arduino-cli lib install "$alt" && install_ok=true
-              fi
-              # 3) genérico: trocar "_" por espaço
-              if [ "$install_ok" = false ]; then
-                generic="$(echo "$lib" | sed 's/_/ /g')"
-                if [ "$generic" != "$lib" ]; then
-                  echo "→ tentando '$generic'"
-                  arduino-cli lib install "$generic" && install_ok=true
-                fi
-              fi
+            name="${lib%@*}"                      # antes do @
+            ver="${lib#*@}"; [ "$ver" = "$name" ] && ver=""  # depois do @ (se houver)
+            lname="$(echo "$name" | tr '[:upper:]' '[:lower:]')"
+
+            echo "Instalando: $lib"
+            ok=false
+
+            # 1) Tenta pelo Library Manager (exato, depois por nome)
+            arduino-cli lib install "$lib" && ok=true || true
+            if [ "$ok" = false ] && [ -n "$ver" ]; then
+              arduino-cli lib install "$name@$ver" && ok=true || true
+            fi
+            if [ "$ok" = false ]; then
+              arduino-cli lib install "$name" && ok=true || true
             fi
 
-            if [ "$install_ok" = true ]; then
+            # 2) Aliases (_ -> espaço) e caso específico LiquidCrystal_I2C
+            if [ "$ok" = false ]; then
+              alt="$(echo "$name" | sed 's/_/ /g')"
+              [ "$alt" != "$name" ] && arduino-cli lib install "$alt${ver:+@$ver}" && ok=true || true
+            fi
+
+            # 3) Fallbacks GitHub (o que não está no Library Manager)
+            if [ "$ok" = false ]; then
+              case "$lname" in
+                asyncmqttclient)
+                  git clone --depth 1 https://github.com/marvinroger/async-mqtt-client.git /tmp/AsyncMqttClient
+                  mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
+                  ok=true
+                  ;;
+                espasyncwebserver)
+                  # seu fork ESP32Async, fixo na 3.7.7 que funciona no seu PC
+                  git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
+                  (
+                    cd /tmp/ESPAsyncWebServer
+                    git fetch --tags --depth 1 || true
+                    git checkout "tags/v3.7.7" 2>/dev/null || git checkout "tags/3.7.7" 2>/dev/null || true
+                  )
+                  mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
+                  ok=true
+                  ;;
+                asynctcp|espasynctcp)
+                  # preferencial para ESP32Async; fallback me-no-dev
+                  git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git /tmp/AsyncTCP || \
+                  git clone --depth 1 https://github.com/me-no-dev/AsyncTCP.git  /tmp/AsyncTCP
+                  mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncTCP ~/Arduino/libraries/
+                  ok=true
+                  ;;
+              esac
+            fi
+
+            if [ "$ok" = true ]; then
               echo "✅ OK: $lib"
             else
-              echo "❌ Não foi possível instalar '$lib'."
-              exit 1
+              echo "❌ Não foi possível instalar '$lib'"; exit 1
             fi
           done
+
 
       # >>> Fixar forks corretos (ESP32 vs ESP8266) <<<
       - name: Fixar forks corretos (ESP32 vs ESP8266)
