@@ -70,7 +70,7 @@ jobs:
         id: fqbn
         shell: python3 {0}
         run: |
-          import json, os
+          import json
           data = json.loads("""${{ inputs.fqbn_json }}""")
           if not isinstance(data, list) or not data:
             raise SystemExit("fqbn_json precisa ser uma lista não-vazia")
@@ -134,29 +134,6 @@ jobs:
                   arduino-cli lib install "$generic" && install_ok=true
                 fi
               fi
-              # 4) fallbacks via GitHub (async*)
-              if [ "$install_ok" = false ]; then
-                case "$lib" in
-                  AsyncMqttClient*)
-                    git clone --depth 1 https://github.com/marvinroger/async-mqtt-client.git /tmp/AsyncMqttClient
-                    mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
-                    install_ok=true
-                    ;;
-                  ESPAsyncWebServer*)
-                    git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
-                    mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
-                    install_ok=true
-                    ;;
-                  ESPAsyncTCP*|AsyncTCP*)
-                    git clone --depth 1 https://github.com/me-no-dev/ESPAsyncTCP.git /tmp/ESPAsyncTCP || true
-                    git clone --depth 1 https://github.com/me-no-dev/AsyncTCP.git   /tmp/AsyncTCP   || true
-                    mkdir -p ~/Arduino/libraries
-                    [ -d /tmp/ESPAsyncTCP ] && cp -r /tmp/ESPAsyncTCP ~/Arduino/libraries/
-                    [ -d /tmp/AsyncTCP ]   && cp -r /tmp/AsyncTCP   ~/Arduino/libraries/
-                    install_ok=true
-                    ;;
-                esac
-              fi
             fi
 
             if [ "$install_ok" = true ]; then
@@ -166,6 +143,47 @@ jobs:
               exit 1
             fi
           done
+
+      # >>> Fixar forks corretos (ESP32 vs ESP8266) <<<
+      - name: Fixar forks corretos (ESP32 vs ESP8266)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FQBN="$(cat /tmp/fqbn.txt)"
+          mkdir -p ~/Arduino/libraries
+
+          if echo "$FQBN" | grep -qi '^esp32:esp32:'; then
+            echo "→ Target ESP32: instalando forks da organização ESP32Async"
+
+            # Remove possíveis versões conflitantes
+            rm -rf ~/Arduino/libraries/ESPAsyncWebServer || true
+            rm -rf ~/Arduino/libraries/AsyncTCP        || true
+
+            # Forks corretos para ESP32 (compatíveis com core 3.x / IDF v5)
+            git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
+            git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git          /tmp/AsyncTCP
+
+            cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
+            cp -r /tmp/AsyncTCP          ~/Arduino/libraries/
+
+          elif echo "$FQBN" | grep -qi '^esp8266:esp8266:'; then
+            echo "→ Target ESP8266: instalando libs originais do me-no-dev"
+
+            rm -rf ~/Arduino/libraries/ESPAsyncWebServer || true
+            rm -rf ~/Arduino/libraries/ESPAsyncTCP       || true
+
+            git clone --depth 1 https://github.com/me-no-dev/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
+            git clone --depth 1 https://github.com/me-no-dev/ESPAsyncTCP.git       /tmp/ESPAsyncTCP
+
+            cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
+            cp -r /tmp/ESPAsyncTCP       ~/Arduino/libraries/
+          else
+            echo "→ FQBN não é ESP32 nem ESP8266; nenhum fork especial aplicado."
+          fi
+
+          echo "✅ Bibliotecas ativas:"
+          ls -1 ~/Arduino/libraries
 
       - name: Localizar sketch (.ino)
         id: find-sketch
