@@ -105,48 +105,98 @@ jobs:
           echo "=== Cores instalados ==="
           arduino-cli core list
 
-      - name: Instalar bibliotecas (Library Manager + fallbacks GitHub)
-        if: ${{ inputs.arduino_libs != '' }}
-        shell: bash
-        run: |
+        - name: Instalar bibliotecas (globais + extras do repositório)
+          shell: bash
+          run: |
           set -euo pipefail
-          echo "${{ inputs.arduino_libs }}" | awk 'NF' | while read -r raw; do
+
+          echo "=== Montando lista de bibliotecas ==="
+
+          # 1) Bibliotecas GLOBAIS, usadas na maioria dos seus projetos
+          BASE_LIBS=$(cat << 'EOF'
+          LiquidCrystal I2C
+          AsyncMqttClient
+          ESPAsyncWebServer
+          AsyncTCP
+          ArduinoJson@7.1.0
+          OneWire
+          DallasTemperature
+          PCF8574
+          EOF
+          )
+
+          # 2) Bibliotecas EXTRAS (opcional) vindas do workflow local
+          #    (se você não passar nada em inputs.arduino_libs, fica vazio)
+          EXTRA_LIBS="${{ inputs.arduino_libs }}"
+
+          # 3) Junta globais + extras
+          ALL_LIBS=$(printf "%s\n%s\n" "$BASE_LIBS" "$EXTRA_LIBS")
+
+          echo "=== Bibliotecas a instalar (após merge) ==="
+          echo "$ALL_LIBS" | awk 'NF'
+
+          echo "$ALL_LIBS" | awk 'NF' | while read -r raw; do
             # normaliza linha (remove CRLF e espaços)
             lib="$(echo "$raw" | tr -d '\r' | xargs)"
             [ -z "$lib" ] && continue
 
-            name="${lib%@*}"                      # antes do @
-            ver="${lib#*@}"; [ "$ver" = "$name" ] && ver=""  # depois do @ (se houver)
-            lname="$(echo "$name" | tr '[:upper:]' '[:lower:]')"
+            name="${lib%@*}"                             # parte antes do @
+            ver="${lib#*@}"; [ "$ver" = "$name" ] && ver=""  # parte depois do @ (se houver)
+            lname="$(echo "$name" | tr '[:upper:]' '[:lower:]')"  # nome em minúsculas
 
-            echo "Instalando: $lib"
+            echo "-----------------------------"
+            echo "Instalando biblioteca: '$lib'"
             ok=false
 
-            # 1) Tenta pelo Library Manager (exato, depois por nome)
-            arduino-cli lib install "$lib" && ok=true || true
-            if [ "$ok" = false ] && [ -n "$ver" ]; then
-              arduino-cli lib install "$name@$ver" && ok=true || true
-            fi
-            if [ "$ok" = false ]; then
-              arduino-cli lib install "$name" && ok=true || true
+            ########################################
+            # 1) TENTATIVA VIA LIBRARY MANAGER
+            ########################################
+
+            # tenta instalar exatamente como veio (incluindo versão, se tiver)
+            if arduino-cli lib install "$lib"; then
+              ok=true
             fi
 
-            # 2) Aliases (_ -> espaço) e caso específico LiquidCrystal_I2C
+            # se falhou e tem versão, tenta "Nome@versao"
+            if [ "$ok" = false ] && [ -n "$ver" ]; then
+              if arduino-cli lib install "$name@$ver"; then
+                ok=true
+              fi
+            fi
+
+            # se ainda falhou, tenta só pelo nome, sem versão
+            if [ "$ok" = false ]; then
+              if arduino-cli lib install "$name"; then
+                ok=true
+              fi
+            fi
+
+            ########################################
+            # 2) ALIASES COM "_" -> " " (ex: LiquidCrystal_I2C)
+            ########################################
             if [ "$ok" = false ]; then
               alt="$(echo "$name" | sed 's/_/ /g')"
-              [ "$alt" != "$name" ] && arduino-cli lib install "$alt${ver:+@$ver}" && ok=true || true
+              if [ "$alt" != "$name" ]; then
+                if arduino-cli lib install "$alt${ver:+@$ver}"; then
+                  ok=true
+                fi
+              fi
             fi
 
-            # 3) Fallbacks GitHub (o que não está no Library Manager)
+            ########################################
+            # 3) FALLBACKS GITHUB (libs fora do Library Manager)
+            ########################################
             if [ "$ok" = false ]; then
               case "$lname" in
                 asyncmqttclient)
+                  echo "→ Fallback GitHub: AsyncMqttClient"
                   git clone --depth 1 https://github.com/marvinroger/async-mqtt-client.git /tmp/AsyncMqttClient
                   mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
                   ok=true
                   ;;
+
                 espasyncwebserver)
-                  # seu fork ESP32Async, fixo na 3.7.7 que funciona no seu PC
+                  echo "→ Fallback GitHub: ESPAsyncWebServer (fork ESP32Async, tag 3.7.7)"
                   git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
                   (
                     cd /tmp/ESPAsyncWebServer
@@ -156,22 +206,36 @@ jobs:
                   mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
                   ok=true
                   ;;
+
                 asynctcp|espasynctcp)
+                  echo "→ Fallback GitHub: AsyncTCP (ESP32Async ou me-no-dev)"
                   # preferencial para ESP32Async; fallback me-no-dev
                   git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git /tmp/AsyncTCP || \
                   git clone --depth 1 https://github.com/me-no-dev/AsyncTCP.git  /tmp/AsyncTCP
                   mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncTCP ~/Arduino/libraries/
                   ok=true
                   ;;
+
+                # Aqui você pode adicionar OUTROS fallbacks específicos, ex.:
+                # minhalibpersonalizada)
+                #   git clone --depth 1 https://github.com/andre-beautomacao/MinhaLibPersonalizada.git /tmp/MinhaLibPersonalizada
+                #   mkdir -p ~/Arduino/libraries && cp -r /tmp/MinhaLibPersonalizada ~/Arduino/libraries/
+                #   ok=true
+                #   ;;
               esac
             fi
 
+            ########################################
+            # 4) RESULTADO FINAL
+            ########################################
             if [ "$ok" = true ]; then
               echo "✅ OK: $lib"
             else
-              echo "❌ Não foi possível instalar '$lib'"; exit 1
+              echo "❌ Não foi possível instalar a biblioteca '$lib'"
+              exit 1
             fi
           done
+
 
 
       # >>> Fixar forks corretos (ESP32 vs ESP8266) <<<
