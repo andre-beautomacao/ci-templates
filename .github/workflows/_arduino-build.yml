@@ -7,41 +7,49 @@ on:
         description: 'JSON com FQBN(s). Ex.: ["esp32:esp32:esp32"] (usaremos o 1º)'
         required: true
         type: string
+
       sketches_glob:
         description: 'Globs para achar .ino (separe por vírgula). Default: "*.ino"'
         required: false
         type: string
         default: "*.ino"
+
       esp32_core_version:
         description: "Versão do core ESP32; vazio para latest"
         required: false
         type: string
         default: "3.3.2"
+
       esp8266_core_version:
         description: "Versão do core ESP8266; vazio para latest"
         required: false
         type: string
         default: "3.1.2"
+
       arduino_libs:
-        description: "Bibliotecas (uma por linha; pode usar @versão)"
+        description: "Bibliotecas adicionais (uma por linha; pode usar @versão)"
         required: false
         type: string
         default: ""
+
       extra_build_flags:
-        description: "Flags do compilador (ex.: -DDEBUG=1)"
+        description: "Flags extras do compilador (ex.: -DDEBUG=1)"
         required: false
         type: string
         default: ""
+
       board_options:
         description: 'Opções do board (ex.: "build.partitions=min_spiffs")'
         required: false
         type: string
         default: ""
+
       upload_artifacts:
-        description: "Publicar artefatos (firmware.bin, .elf)"
+        description: "Enviar firmware.bin como artefato"
         required: false
         type: boolean
         default: true
+
 
 jobs:
   build:
@@ -53,9 +61,24 @@ jobs:
       BOARD_OPTIONS: ${{ inputs.board_options }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-arduino-cli@v2
 
+      # --------------------------------------------------------------------
+      # CHECKOUT
+      # --------------------------------------------------------------------
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------------------------
+      # ARDUINO CLI
+      # --------------------------------------------------------------------
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+
+      # --------------------------------------------------------------------
+      # BOARD MANAGER URLs
+      # --------------------------------------------------------------------
       - name: Configurar Board Manager URLs
         run: |
           set -euo pipefail
@@ -66,7 +89,11 @@ jobs:
           arduino-cli config dump
           arduino-cli core update-index
 
-      - name: Escolher FQBN (1º do JSON)
+
+      # --------------------------------------------------------------------
+      # SELECT FQBN
+      # --------------------------------------------------------------------
+      - name: Selecionar FQBN (1º item da lista JSON)
         id: fqbn
         shell: python3 {0}
         run: |
@@ -78,11 +105,16 @@ jobs:
           print(f"FQBN selecionado: {fqbn}")
           open("/tmp/fqbn.txt","w").write(fqbn)
 
-      - name: Instalar core do FQBN
+
+      # --------------------------------------------------------------------
+      # INSTALL CORES
+      # --------------------------------------------------------------------
+      - name: Instalar core do board
         run: |
           set -euo pipefail
           FQBN="$(cat /tmp/fqbn.txt)"
           arduino-cli core update-index
+
           case "$FQBN" in
             esp32:esp32:*)
               if [ -n "${{ inputs.esp32_core_version }}" ]; then
@@ -99,20 +131,25 @@ jobs:
               fi
               ;;
             *)
-              echo "FQBN desconhecido: $FQBN"; exit 1
+              echo "FQBN desconhecido: $FQBN"
+              exit 1
               ;;
           esac
+
           echo "=== Cores instalados ==="
           arduino-cli core list
 
-        - name: Instalar bibliotecas (globais + extras do repositório)
-          shell: bash
-          run: |
+
+      # --------------------------------------------------------------------
+      # INSTALL LIBRARIES (GLOBAL + EXTRA)
+      # --------------------------------------------------------------------
+      - name: Instalar bibliotecas (globais + extras)
+        shell: bash
+        run: |
           set -euo pipefail
 
           echo "=== Montando lista de bibliotecas ==="
 
-          # 1) Bibliotecas GLOBAIS, usadas na maioria dos seus projetos
           BASE_LIBS=$(cat << 'EOF'
           LiquidCrystal I2C
           AsyncMqttClient
@@ -125,160 +162,108 @@ jobs:
           EOF
           )
 
-          # 2) Bibliotecas EXTRAS (opcional) vindas do workflow local
-          #    (se você não passar nada em inputs.arduino_libs, fica vazio)
           EXTRA_LIBS="${{ inputs.arduino_libs }}"
 
-          # 3) Junta globais + extras
           ALL_LIBS=$(printf "%s\n%s\n" "$BASE_LIBS" "$EXTRA_LIBS")
 
-          echo "=== Bibliotecas a instalar (após merge) ==="
+          echo "=== Bibliotecas a instalar ==="
           echo "$ALL_LIBS" | awk 'NF'
 
           echo "$ALL_LIBS" | awk 'NF' | while read -r raw; do
-            # normaliza linha (remove CRLF e espaços)
             lib="$(echo "$raw" | tr -d '\r' | xargs)"
             [ -z "$lib" ] && continue
 
-            name="${lib%@*}"                             # parte antes do @
-            ver="${lib#*@}"; [ "$ver" = "$name" ] && ver=""  # parte depois do @ (se houver)
-            lname="$(echo "$name" | tr '[:upper:]' '[:lower:]')"  # nome em minúsculas
+            name="${lib%@*}"
+            ver="${lib#*@}"; [ "$ver" = "$name" ] && ver=""
+            lname="$(echo "$name" | tr '[:upper:]' '[:lower:]')"
 
             echo "-----------------------------"
-            echo "Instalando biblioteca: '$lib'"
+            echo "Instalando '$lib'"
             ok=false
 
-            ########################################
-            # 1) TENTATIVA VIA LIBRARY MANAGER
-            ########################################
+            if arduino-cli lib install "$lib"; then ok=true; fi
+            if [ "$ok" = false ] && [ -n "$ver" ]; then arduino-cli lib install "$name@$ver" && ok=true || true; fi
+            if [ "$ok" = false ]; then arduino-cli lib install "$name" && ok=true || true; fi
 
-            # tenta instalar exatamente como veio (incluindo versão, se tiver)
-            if arduino-cli lib install "$lib"; then
-              ok=true
-            fi
-
-            # se falhou e tem versão, tenta "Nome@versao"
-            if [ "$ok" = false ] && [ -n "$ver" ]; then
-              if arduino-cli lib install "$name@$ver"; then
-                ok=true
-              fi
-            fi
-
-            # se ainda falhou, tenta só pelo nome, sem versão
-            if [ "$ok" = false ]; then
-              if arduino-cli lib install "$name"; then
-                ok=true
-              fi
-            fi
-
-            ########################################
-            # 2) ALIASES COM "_" -> " " (ex: LiquidCrystal_I2C)
-            ########################################
             if [ "$ok" = false ]; then
               alt="$(echo "$name" | sed 's/_/ /g')"
-              if [ "$alt" != "$name" ]; then
-                if arduino-cli lib install "$alt${ver:+@$ver}"; then
-                  ok=true
-                fi
-              fi
+              [ "$alt" != "$name" ] && arduino-cli lib install "$alt${ver:+@$ver}" && ok=true || true
             fi
 
-            ########################################
-            # 3) FALLBACKS GITHUB (libs fora do Library Manager)
-            ########################################
             if [ "$ok" = false ]; then
               case "$lname" in
                 asyncmqttclient)
-                  echo "→ Fallback GitHub: AsyncMqttClient"
                   git clone --depth 1 https://github.com/marvinroger/async-mqtt-client.git /tmp/AsyncMqttClient
-                  mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
+                  mkdir -p ~/Arduino/libraries
+                  cp -r /tmp/AsyncMqttClient ~/Arduino/libraries/
                   ok=true
                   ;;
-
                 espasyncwebserver)
-                  echo "→ Fallback GitHub: ESPAsyncWebServer (fork ESP32Async, tag 3.7.7)"
                   git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
-                  (
-                    cd /tmp/ESPAsyncWebServer
-                    git fetch --tags --depth 1 || true
-                    git checkout "tags/v3.7.7" 2>/dev/null || git checkout "tags/3.7.7" 2>/dev/null || true
-                  )
-                  mkdir -p ~/Arduino/libraries && cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
+                  mkdir -p ~/Arduino/libraries
+                  cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
                   ok=true
                   ;;
-
-                asynctcp|espasynctcp)
-                  echo "→ Fallback GitHub: AsyncTCP (ESP32Async ou me-no-dev)"
-                  # preferencial para ESP32Async; fallback me-no-dev
+                asynctcp)
                   git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git /tmp/AsyncTCP || \
-                  git clone --depth 1 https://github.com/me-no-dev/AsyncTCP.git  /tmp/AsyncTCP
-                  mkdir -p ~/Arduino/libraries && cp -r /tmp/AsyncTCP ~/Arduino/libraries/
+                  git clone --depth 1 https://github.com/me-no-dev/AsyncTCP.git /tmp/AsyncTCP
+                  mkdir -p ~/Arduino/libraries
+                  cp -r /tmp/AsyncTCP ~/Arduino/libraries/
                   ok=true
                   ;;
-
-                # Aqui você pode adicionar OUTROS fallbacks específicos, ex.:
-                # minhalibpersonalizada)
-                #   git clone --depth 1 https://github.com/andre-beautomacao/MinhaLibPersonalizada.git /tmp/MinhaLibPersonalizada
-                #   mkdir -p ~/Arduino/libraries && cp -r /tmp/MinhaLibPersonalizada ~/Arduino/libraries/
-                #   ok=true
-                #   ;;
               esac
             fi
 
-            ########################################
-            # 4) RESULTADO FINAL
-            ########################################
-            if [ "$ok" = true ]; then
-              echo "✅ OK: $lib"
-            else
-              echo "❌ Não foi possível instalar a biblioteca '$lib'"
+            if [ "$ok" = false ]; then
+              echo "❌ Não foi possível instalar '$lib'"
               exit 1
             fi
+
+            echo "✅ OK: $lib"
           done
 
 
-
-      # >>> Fixar forks corretos (ESP32 vs ESP8266) <<<
+      # --------------------------------------------------------------------
+      # FIX FORKS (ESP32/ESP8266)
+      # --------------------------------------------------------------------
       - name: Fixar forks corretos (ESP32 vs ESP8266)
         shell: bash
         run: |
           set -euo pipefail
-
           FQBN="$(cat /tmp/fqbn.txt)"
           mkdir -p ~/Arduino/libraries
 
           if echo "$FQBN" | grep -qi '^esp32:esp32:'; then
-            echo "→ Target ESP32: instalando forks da organização ESP32Async"
+            echo "→ Usando forks ESP32Async"
+            rm -rf ~/Arduino/libraries/AsyncTCP ~/Arduino/libraries/ESPAsyncWebServer || true
 
-            # Remove possíveis versões conflitantes
-            rm -rf ~/Arduino/libraries/ESPAsyncWebServer || true
-            rm -rf ~/Arduino/libraries/AsyncTCP        || true
-
-            # Forks corretos para ESP32 (compatíveis com core 3.x / IDF v5)
+            git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git /tmp/AsyncTCP
             git clone --depth 1 https://github.com/ESP32Async/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
-            git clone --depth 1 https://github.com/ESP32Async/AsyncTCP.git          /tmp/AsyncTCP
 
+            cp -r /tmp/AsyncTCP ~/Arduino/libraries/
             cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
-            cp -r /tmp/AsyncTCP          ~/Arduino/libraries/
 
           elif echo "$FQBN" | grep -qi '^esp8266:esp8266:'; then
-            echo "→ Target ESP8266: instalando libs originais do me-no-dev"
+            echo "→ Usando libs originais (me-no-dev)"
+            rm -rf ~/Arduino/libraries/AsyncTCP ~/Arduino/libraries/ESPAsyncWebServer || true
 
-            rm -rf ~/Arduino/libraries/ESPAsyncWebServer || true
-            rm -rf ~/Arduino/libraries/ESPAsyncTCP       || true
-
+            git clone --depth 1 https://github.com/me-no-dev/AsyncTCP.git /tmp/AsyncTCP
             git clone --depth 1 https://github.com/me-no-dev/ESPAsyncWebServer.git /tmp/ESPAsyncWebServer
-            git clone --depth 1 https://github.com/me-no-dev/ESPAsyncTCP.git       /tmp/ESPAsyncTCP
 
+            cp -r /tmp/AsyncTCP ~/Arduino/libraries/
             cp -r /tmp/ESPAsyncWebServer ~/Arduino/libraries/
-            cp -r /tmp/ESPAsyncTCP       ~/Arduino/libraries/
+
           else
             echo "→ FQBN não é ESP32 nem ESP8266; nenhum fork especial aplicado."
           fi
 
-          echo "✅ Bibliotecas ativas:"
+          echo "=== Bibliotecas instaladas ==="
           ls -1 ~/Arduino/libraries
 
+
+      # --------------------------------------------------------------------
+      # FIND .INO
+      # --------------------------------------------------------------------
       - name: Localizar sketch (.ino)
         id: find-sketch
         shell: bash
@@ -287,66 +272,80 @@ jobs:
           IFS=',' read -ra GLOBS <<< "${SKETCHES_GLOB}"
           files=()
           for g in "${GLOBS[@]}"; do
-            pat="${g//\*\*\//}"; pat="${pat// /}"
-            while IFS= read -r -d '' f; do files+=("${f#./}"); done < <(find . -path "./.git" -prune -o -type f -iname "$pat" -print0)
+            find . -type f -iname "$g" -print0 | while IFS= read -r -d '' f; do
+              files+=("${f#./}")
+            done
           done
+
           if [ ${#files[@]} -eq 0 ]; then
-            echo "Nenhum .ino encontrado pelos globs: ${SKETCHES_GLOB}"; exit 1
+            echo "Nenhum .ino encontrado!"
+            exit 1
           fi
-          # usa o primeiro encontrado (padrão: um sketch por repositório)
+
           echo "SKETCH=${files[0]}" >> $GITHUB_OUTPUT
           echo "Sketch selecionado: ${files[0]}"
 
-      - name: Compilar
+
+      # --------------------------------------------------------------------
+      # BUILD
+      # --------------------------------------------------------------------
+      - name: Compilar firmware
         shell: bash
         run: |
           set -euo pipefail
+
           FQBN="$(cat /tmp/fqbn.txt)"
           SKETCH="${{ steps.find-sketch.outputs.SKETCH }}"
-          SKETCH_DIR="$(dirname "$SKETCH")"
+          DIR="$(dirname "$SKETCH")"
 
           BP=""
           if [ -n "$BOARD_OPTIONS" ]; then
             IFS=',' read -ra OPTS <<< "$BOARD_OPTIONS"
             for kv in "${OPTS[@]}"; do
-              kv="$(echo "$kv" | xargs)"; [ -z "$kv" ] && continue
+              kv="$(echo "$kv" | xargs)"
+              [ -z "$kv" ] && continue
               BP+=" --build-property ${kv}"
             done
           fi
-          if echo "$FQBN" | grep -qi '^esp32:esp32:' && [ -z "$BOARD_OPTIONS" ]; then
-            BP+=" --build-property build.partitions=min_spiffs"
-            echo "Usando padrão ESP32: build.partitions=min_spiffs"
-          fi
 
-          echo "Compilando: $SKETCH (FQBN=$FQBN)"
+          echo "Compilando: $SKETCH  (FQBN=$FQBN)"
           arduino-cli compile \
             --fqbn "$FQBN" \
             --build-property compiler.cpp.extra_flags="${EXTRA_BUILD_FLAGS}" \
             $BP \
             --export-binaries \
-            "$SKETCH_DIR"
+            "$DIR"
 
-      - name: Copiar binário principal para ./firmware/firmware.bin
+
+      # --------------------------------------------------------------------
+      # COPY FIRMWARE
+      # --------------------------------------------------------------------
+      - name: Copiar firmware.bin para pasta /firmware
         shell: bash
         run: |
           set -euo pipefail
           SKETCH="${{ steps.find-sketch.outputs.SKETCH }}"
-          ROOT_DIR="$(dirname "$SKETCH")"
-          BUILD_DIR="${ROOT_DIR}/build"
-          TARGET_NAME="$(basename "$SKETCH" .ino)"
-          BIN_ORIG="$(find "$BUILD_DIR" -maxdepth 3 -type f -name "${TARGET_NAME}.ino.bin" | head -n 1)"
-          DEST_DIR="${ROOT_DIR}/firmware"
-          mkdir -p "$DEST_DIR"
-          if [ -n "$BIN_ORIG" ] && [ -f "$BIN_ORIG" ]; then
-            cp "$BIN_ORIG" "$DEST_DIR/firmware.bin"
-            echo "✅ Copiado para: $DEST_DIR/firmware.bin"
+          DIR="$(dirname "$SKETCH")"
+          BUILD="$DIR/build"
+          TARGET="$(basename "$SKETCH" .ino)"
+
+          BIN_ORIG="$(find "$BUILD" -type f -name "${TARGET}.ino.bin" | head -n 1)"
+          DEST="$DIR/firmware"
+          mkdir -p "$DEST"
+
+          if [ -f "$BIN_ORIG" ]; then
+            cp "$BIN_ORIG" "$DEST/firmware.bin"
+            echo "✅ Firmware salvo em: $DEST/firmware.bin"
           else
-            echo "❌ Binário principal não encontrado."
-            echo "Arquivos .bin existentes:"; find "$BUILD_DIR" -maxdepth 3 -type f -name "*.bin" || true
+            echo "❌ Não encontrei o firmware compilado!"
             exit 1
           fi
 
-      - name: Artefatos
+
+      # --------------------------------------------------------------------
+      # ARTIFACTS
+      # --------------------------------------------------------------------
+      - name: Publicar artefatos
         if: ${{ inputs.upload_artifacts }}
         uses: actions/upload-artifact@v4
         with:
